@@ -216,6 +216,7 @@ def fish_fig_dir(dir_analysis, fish):
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+
 def comparison_fig_dir(dir_analysis, comparison_tag):
     """
     Group-level comparison figure directory.
