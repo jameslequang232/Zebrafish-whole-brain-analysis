@@ -1,40 +1,15 @@
+
 import os
-import sys
 import gc
-import pandas as pd
+from pathlib import Path
+import numpy as np
 import joblib
 import matplotlib.pyplot as plt
-import nibabel as nib
-import ants
-import numpy as np
-
+from scipy.stats import zscore
 from sklearn.decomposition import FactorAnalysis
 from sklearn.cluster import AgglomerativeClustering
-from tqdm import tqdm
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
-from sklearn.decomposition import TruncatedSVD
-from scipy.stats import zscore
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-
-import importlib
-from collections import defaultdict
-import traceback
+from scipy.cluster.hierarchy import linkage, dendrogram
 from matplotlib.backends.backend_pdf import PdfPages
-from typing import Union
-from joblib import Parallel, delayed
-from multiprocessing import Pool, cpu_count
-import joblib
-from scipy.ndimage import percentile_filter, gaussian_filter
-from scipy import stats
-from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
-from sklearn.decomposition import FactorAnalysis
-from sklearn.metrics.pairwise import cosine_similarity
-from scipy.signal import fftconvolve
-import pickle
-import tifffile
-
 
 BASE_DIR = Path("/mnt/storage-raid10/Yun/analysis_output/chemogenetic")
 PROJ_ID = "hcrt-trpv1_huc-h2b-g8m_csn_120min"
@@ -56,96 +31,12 @@ N_CLUSTERS = 7
 PHASIC_DPRIME_THRESH = 0.5
 RESPONSE_TYPES = ["tonic_pos", "tonic_neg", "phasic_pos", "phasic_neg"]
 
-#low mem method to load fish data and responders
-
-def process_fish(fish_id):
-    fish_dir = BASE_DIR / PROJ_ID / fish_id
-    
-    try:
-        f_tonic = np.load(fish_dir / "f_tonic.npy", mmap_mode="r")
-        f_phasic = np.load(fish_dir / "f_phasic.npy", mmap_mode="r")
-        
-      
-        tonic_pos_idx = np.load(fish_dir / "tonic_pos_glm_iaaft_nullp99_idxs.npy")
-        tonic_neg_idx = np.load(fish_dir / "tonic_neg_glm_iaaft_nullp99_idxs.npy")
-        dprime = np.load(fish_dir / "phasic_dprime_cells_raw.npy")
-
-      
-        all_tonic_idx = np.union1d(tonic_pos_idx, tonic_neg_idx)
-        all_phasic_idx = np.where(np.abs(dprime) >= PHASIC_DPRIME_THRESH)[0]
-
-     
-        tonic_slice = np.array(f_tonic[all_tonic_idx, :])
-        phasic_slice = np.array(f_phasic[all_phasic_idx, :])
-
-        return fish_id, tonic_slice, phasic_slice
-
-    except FileNotFoundError:
-        return None
-
-# Main Execution
-tonic_data = {}
-phasic_data = {}
-
-print("Started processing fish folders")
-
-
-with ThreadPoolExecutor(max_workers=3) as executor:
-    results = executor.map(process_fish, EXPT_FISH_LIST)
-
-for result in results:
-    if result is not None:
-        fish_id, t_res, p_res = result
-        tonic_data[fish_id] = t_res
-        phasic_data[fish_id] = p_res
-
-print(f"Completed processing for {len(tonic_data)} fish.")
-
-
-from scipy.stats import zscore
-
-z_phasic = {}
-
-print("Starting batch Z-score normalization for all experimental fish...\n")
-
-
-for fish_id in EXPT_FISH_LIST:
-  
-    if fish_id in phasic_data:
-    
-        raw_phasic_traces = phasic_data[fish_id]
-
-        z_phasic_traces = zscore(raw_phasic_traces, axis=1)
-
-        z_phasic[fish_id] = z_phasic_traces
-        
-        print(f"Normalization Complete for: {fish_id}")
-        print(f"Matrix Shape: {z_phasic_traces.shape}")
-        print(f"Mean Verification: {z_phasic_traces.mean():.3f} | Std Dev: {z_phasic_traces.std():.3f}\n")
-    else:
-        print(f"Fish data matrix not found in memory for: {fish_id}\n")
-
-print("All experimental fish traces have been successfully normalized!")
-
-
-import os
-import gc
-from pathlib import Path
-import numpy as np
-import joblib
-import matplotlib.pyplot as plt
-from scipy.stats import zscore
-from sklearn.decomposition import FactorAnalysis
-from sklearn.cluster import AgglomerativeClustering
-from scipy.cluster.hierarchy import linkage, dendrogram
-from matplotlib.backends.backend_pdf import PdfPages
-
 print("Step one of the clustering notebook (FA + Agglomerative Hierarchical Clustering)")
 
 
 for fish_id in EXPT_FISH_LIST:
     fish_path = BASE_DIR / PROJ_ID / fish_id
-    out_dir = fish_path / f"FA_agglo_clustering_results"
+    out_dir = fish_path / f"FA_agglo_clustering_results_POST_DRUG"
     out_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\nProcessing Directory: {fish_id}")
@@ -181,9 +72,9 @@ for fish_id in EXPT_FISH_LIST:
                 print(f" Skipped {category} because cell count is too low.")
                 continue
 
-     
-            valid_mask = np.std(selected_traces, axis=1) > 0
-            clean_traces = selected_traces[valid_mask]
+            post_drug_traces = selected_traces[:, 2700:7200] #updated this to focus on post-drug time window (2700-7200) for pipeline
+            valid_mask = np.std(post_drug_traces, axis=1) > 0
+            clean_traces = post_drug_traces[valid_mask]
             clean_idxs = cell_idxs[valid_mask]
             
             z_traces = zscore(clean_traces, axis=1)
