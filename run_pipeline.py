@@ -25,15 +25,16 @@ from matplotlib.backends.backend_pdf import PdfPages
 from typing import Union
 from joblib import Parallel, delayed
 from multiprocessing import Pool, cpu_count
-import joblib
+
 from scipy.ndimage import percentile_filter, gaussian_filter
 from scipy import stats
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
-from sklearn.decomposition import FactorAnalysis
+
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.signal import fftconvolve
 import pickle
 import tifffile
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 
 BASE_DIR = Path("/mnt/storage-raid10/Yun/analysis_output/chemogenetic")
@@ -51,221 +52,184 @@ EXPT_FISH_LIST = [
     "260515_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1"
 ]
 
-N_COMPONENTS = 5 
+N_COMPONENTS = 5
 N_CLUSTERS = 7
-PHASIC_DPRIME_THRESH = 0.5
+PHASIC_DPRIME_THRESH = 0.25
 RESPONSE_TYPES = ["tonic_pos", "tonic_neg", "phasic_pos", "phasic_neg"]
 
-#low mem method to load fish data and responders
+DIR_ANTS_OUTPUT = str(BASE_DIR)
 
-def process_fish(fish_id):
-    fish_dir = BASE_DIR / PROJ_ID / fish_id
+example_fish = '251008_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish4' #used for testing
+
+#Parameters 
+
+# IMAGING SPECS 
+sec_per_volume = 1
+volume_per_sec = 1
+n_slices = 40
+depth = 250
+binning = 1
+res_x = 1.52*binning
+res_y = 1.52*binning
+res_z = depth/n_slices
+rotation_k = 2 
+
+# DRUG PERFUSION PARAMETER 
+drug_uM   = 10.0
+V_ml     = 15.0
+Q_ml_min = 4.5
+
+
+baseline_start = 0 * 60 * volume_per_sec
+baseline_end = 45 * 60 * volume_per_sec
+
+# define drug perfusion start & end time frame 
+drug_start = 46  * 60 * volume_per_sec
+drug_end = 90  * 60 * volume_per_sec
+
+# define E3+DMSO wash out start & end time frame
+wash_start = 91 * 60 * volume_per_sec
+wash_end = 120 * 60 * volume_per_sec
+
+
+#  define delta F / F 's baseline percentile
+df_f_percentile = 20
+
+# define F_tonic's window size and percentile
+f_tonic_window_size = 600  #seconds
+f_tonic_percentile = 20
+
+# permutation test parameters
+p_thresh_permutation = 0.005
+n_resample_permutation = 500
+
+# RUN BH-FDR FILTERING CODE
+BH_Q = 0.05  
+
+
+
+input_tag    = "C"
+K_global     = 600
+drift_global = 1   
+lam_global   = 0.5
+lag_global   = 0  
+
+param_folder_name = f"in{input_tag}_K{K_global}_drift{drift_global}_lam{lam_global}_lag{lag_global}"
+
+CLIP_ABS_DZ = 50.0 
+INCLUDED_BASELINE = 15.0 
+NULL_TAG = "iaaft"
+RESPONDER_NULL_THRESH = 95 
+L_MIN = 20.0  
+BASE_DIR = Path("/mnt/storage-raid10/Yun/analysis_output/chemogenetic")
+PROJ_ID = "hcrt-trpv1_huc-h2b-g8m_csn_120min"
+
+EXPT_FISH_LIST = [
+    "251008_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish4",
+    "251102_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1",
+    "251102_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish2",
+    "251210_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1",
+    "251210_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish2",
+    "251210_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish3",
+    "260514_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1",
+    "260514_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish2",
+    "260515_hcrt-trpv1_huc-h2b-g8m_csn_10uM_fish1"
+]
+
+N_COMPONENTS = 15
+N_CLUSTERS = 7
+PHASIC_DPRIME_THRESH = 0.25 
+RESPONSE_TYPES = ["tonic_pos", "tonic_neg", "phasic_pos", "phasic_neg"]
+
+def process_single_experiment(args):
+    expt_ID, stim_start, stim_end, max_cells, n_components, n_clusters = args
+    print(f"\nProcessing Group: {expt_ID}")
     
-    try:
-        f_tonic = np.load(fish_dir / "f_tonic.npy", mmap_mode="r")
-        f_phasic = np.load(fish_dir / "f_phasic.npy", mmap_mode="r")
-        
-      
-        tonic_pos_idx = np.load(fish_dir / "tonic_pos_glm_iaaft_nullp99_idxs.npy")
-        tonic_neg_idx = np.load(fish_dir / "tonic_neg_glm_iaaft_nullp99_idxs.npy")
-        dprime = np.load(fish_dir / "phasic_dprime_cells_raw.npy")
-
-      
-        all_tonic_idx = np.union1d(tonic_pos_idx, tonic_neg_idx)
-        all_phasic_idx = np.where(np.abs(dprime) >= PHASIC_DPRIME_THRESH)[0]
-
-     
-        tonic_slice = np.array(f_tonic[all_tonic_idx, :])
-        phasic_slice = np.array(f_phasic[all_phasic_idx, :])
-
-        return fish_id, tonic_slice, phasic_slice
-
-    except FileNotFoundError:
-        return None
-
-# Main Execution
-tonic_data = {}
-phasic_data = {}
-
-print("Started processing fish folders")
-
-
-with ThreadPoolExecutor(max_workers=3) as executor:
-    results = executor.map(process_fish, EXPT_FISH_LIST)
-
-for result in results:
-    if result is not None:
-        fish_id, t_res, p_res = result
-        tonic_data[fish_id] = t_res
-        phasic_data[fish_id] = p_res
-
-print(f"Completed processing for {len(tonic_data)} fish.")
-
-
-from scipy.stats import zscore
-
-z_phasic = {}
-
-print("Starting batch Z-score normalization for all experimental fish...\n")
-
-
-for fish_id in EXPT_FISH_LIST:
-  
-    if fish_id in phasic_data:
-    
-        raw_phasic_traces = phasic_data[fish_id]
-
-        z_phasic_traces = zscore(raw_phasic_traces, axis=1)
-
-        z_phasic[fish_id] = z_phasic_traces
-        
-        print(f"Normalization Complete for: {fish_id}")
-        print(f"Matrix Shape: {z_phasic_traces.shape}")
-        print(f"Mean Verification: {z_phasic_traces.mean():.3f} | Std Dev: {z_phasic_traces.std():.3f}\n")
-    else:
-        print(f"Fish data matrix not found in memory for: {fish_id}\n")
-
-print("All experimental fish traces have been successfully normalized!")
-
-
-import os
-import gc
-from pathlib import Path
-import numpy as np
-import joblib
-import matplotlib.pyplot as plt
-from scipy.stats import zscore
-from sklearn.decomposition import FactorAnalysis
-from sklearn.cluster import AgglomerativeClustering
-from scipy.cluster.hierarchy import linkage, dendrogram
-from matplotlib.backends.backend_pdf import PdfPages
-
-print("Step one of the clustering notebook (FA + Agglomerative Hierarchical Clustering)")
-
-
-for fish_id in EXPT_FISH_LIST:
-    fish_path = BASE_DIR / PROJ_ID / fish_id
-    out_dir = fish_path / f"FA_agglo_clustering_results"
+    dir_expt = BASE_DIR / PROJ_ID / expt_ID
+ 
+    out_dir = dir_expt / f"FA_agglo_clustering_f={n_components}_c={n_clusters}_t={n_clusters}"
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"\nProcessing Directory: {fish_id}")
-    print(out_dir.resolve())
-
-    for category in RESPONSE_TYPES:
+    for label in RESPONSE_TYPES:
+        is_tonic = "tonic" in label
+        data_filename = "f_tonic.npy" if is_tonic else "f_phasic.npy"
+        data_path = dir_expt / data_filename
+        
+        if not data_path.exists():
+            continue
+            
         try:
-            if "tonic" in category:
-                trace_file = fish_path / "f_tonic.npy"
-                if not trace_file.exists(): continue
-                traces = np.load(trace_file)
-                
-                idx_file = fish_path / f"{category}_glm_iaaft_nullp99_idxs.npy"
-                if not idx_file.exists(): continue
-                cell_idxs = np.load(idx_file)
-                selected_traces = traces[cell_idxs]
+            traces = np.load(data_path)
+            
+    
+            if is_tonic:
+                idx_filename = f"{label}_glm_iaaft_nullp95_idxs.npy"
+                idx_path = dir_expt / idx_filename
+                if not idx_path.exists():
+                    continue
+                idxs = np.load(idx_path)
             else:
-                trace_file = fish_path / "f_phasic.npy"
-                if not trace_file.exists(): continue
-                traces = np.load(trace_file)
-                
-                dprime_file = fish_path / "phasic_dprime_cells_raw.npy"
-                if not dprime_file.exists(): continue
-                dprime = np.load(dprime_file)
-                
-                if category == "phasic_pos":
-                    cell_idxs = np.where(dprime >= PHASIC_DPRIME_THRESH)[0]
+                dprime_path = dir_expt / "phasic_dprime_cells_raw.npy"
+                if not dprime_path.exists():
+                    continue
+                dprime = np.load(dprime_path)
+                if "pos" in label:
+                    idxs = np.where(dprime >= PHASIC_DPRIME_THRESH)[0]
                 else:
-                    cell_idxs = np.where(dprime <= -PHASIC_DPRIME_THRESH)[0]
-                selected_traces = traces[cell_idxs]
-
-            if len(cell_idxs) < N_COMPONENTS:
-                print(f" Skipped {category} because cell count is too low.")
+                    idxs = np.where(dprime <= -PHASIC_DPRIME_THRESH)[0]
+                    
+            idxs = idxs[idxs < traces.shape[0]]
+            if len(idxs) == 0:
                 continue
-
-     
-            valid_mask = np.std(selected_traces, axis=1) > 0
-            clean_traces = selected_traces[valid_mask]
-            clean_idxs = cell_idxs[valid_mask]
+                
+    
+            trace_subset = traces[idxs, stim_start:stim_end]
+            z_traces = zscore(trace_subset, axis=1)
             
-            z_traces = zscore(clean_traces, axis=1)
-            print(f"{category}: Clustering {z_traces.shape[0]} cells across timeline.")
+            valid_mask = np.all(np.isfinite(z_traces), axis=1)
+            if np.sum(valid_mask) < n_clusters:
+                continue
+                
+            z_traces = z_traces[valid_mask]
+            idxs = idxs[valid_mask]
 
-
-            fa = FactorAnalysis(n_components=N_COMPONENTS, random_state=0)
-            latent_space = fa.fit_transform(z_traces) 
+            current_pool_size = z_traces.shape[0]
+            actual_sample_size = min(max_cells, current_pool_size)
             
+            if current_pool_size > max_cells:
+                selected_idx = np.random.choice(current_pool_size, actual_sample_size, replace=False)
+                z_traces = z_traces[selected_idx]
+                idxs = idxs[selected_idx]
 
-            joblib.dump(fa, out_dir / f"FA_model_{category}.joblib")
-
-            factor_variance = np.var(latent_space, axis=0)
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.plot(np.arange(1, N_COMPONENTS + 1), factor_variance, marker='o', color='purple')
-            ax.set_title(f"Factor Variance — {category} — {fish_id}")
-            ax.set_xlabel("Factor Index")
-            ax.set_ylabel("Variance Value")
-            fig.tight_layout()
-            plt.savefig(out_dir / f"factors_variance_{category}.png", dpi=150)
-            plt.close()
-
-            fig, ax = plt.subplots(figsize=(10, 5))
-            for i in range(N_COMPONENTS):
-                ax.plot(fa.components_[i], label=f"F{i+1}", alpha=0.7)
-            ax.set_title(f"Factor Time Traces — {category} — {fish_id}")
-            ax.set_xlabel("Timepoint Volumes")
-            ax.set_ylabel("Component Weight Loading")
-            ax.legend(loc='upper right', fontsize=6, ncol=5)
-            fig.tight_layout()
-            plt.savefig(out_dir / f"factor_time_traces_{category}.png", dpi=200)
-            plt.close()
-
-            pdf_path = out_dir / f"top10cells_allfactors_{category}.pdf"
-            with PdfPages(pdf_path) as pdf:
-                for i in range(min(5, N_COMPONENTS)):
-                    factor_trace = fa.components_[i]
-                    correlations = np.array([
-                        np.corrcoef(z_traces[j], factor_trace)[0, 1]
-                        if np.all(np.isfinite(z_traces[j])) else -np.inf
-                        for j in range(z_traces.shape[0])
-                    ])
-                    top_cell_picks = np.argsort(correlations)[-10:]
-                    
-                    fig, ax = plt.subplots(figsize=(6, 4))
-                    for j in top_cell_picks:
-                        ax.plot(z_traces[j], alpha=0.7)
-                    ax.set_title(f"Top 10 Cells — Factor {i+1} — {category}")
-                    ax.set_xlabel("Timepoint")
-                    ax.set_ylabel("Z-score Signal")
-                    fig.tight_layout()
-                    pdf.savefig(fig)
-                    plt.close(fig)
-
-            agglo = AgglomerativeClustering(n_clusters=N_CLUSTERS, linkage='ward')
-            cluster_labels = agglo.fit_predict(latent_space) + 1 
+            fa = FactorAnalysis(n_components=n_components, random_state=0)
+            latent = fa.fit_transform(z_traces)
             
-            np.save(out_dir / f"cluster_labels_{category}.npy", cluster_labels)
-            np.save(out_dir / f"selected_cell_idxs_{category}.npy", clean_idxs)
-
-
-            if latent_space.shape[0] <= 30000:
-                plot_data = latent_space.copy()
-                if plot_data.shape[0] > 5000:
-                    np.random.seed(0)  # For reproducibility
-                    sampled_picks = np.random.choice(plot_data.shape[0], 5000, replace=False)
-                    plot_data = plot_data[sampled_picks]
-                    
-                linkage_tree = linkage(plot_data, method='ward')
-                fig, ax = plt.subplots(figsize=(10, 5))
-                dendrogram(linkage_tree, no_labels=True, ax=ax)
-                ax.set_title(f"Hierarchical Clustering Dendrogram — {fish_id} — {category}")
-                fig.tight_layout()
-                plt.savefig(out_dir / f"dendrogram_{category}.png", dpi=200)
-                plt.close()
-
-            print(f" {category}: Partitioned cells cleanly. Plots saved to disk.")
+    
+            joblib.dump(fa, out_dir / f"FA_model_{label}.joblib")
+            
+    
+            clustering = AgglomerativeClustering(n_clusters=n_clusters, linkage='ward')
+            cluster_labels = clustering.fit_predict(latent) + 1
+            
+    
+            total_saved = 0
+            for i in range(n_clusters):
+                cluster_indices = idxs[cluster_labels == (i + 1)]
+                out_path = out_dir / f"{label}_c{i+1}_idxs.npy"
+                np.save(out_path, cluster_indices)
+                total_saved += len(cluster_indices)
+                
+            print(f"{label}: Successfully clustered and saved {total_saved} cells.")
+            
+            del z_traces, latent, trace_subset, idxs
+            gc.collect()
             
         except Exception as e:
-            print(f" Error executing pipeline category {category}: {e}")
-            
-    gc.collect()
+            print(f"Failed compiling processing layer {label} inside {expt_ID}: {e}")
+            continue
 
-
-print("finished fa and clustering for all fish")
+if __name__ == "__main__":
+    print("Launching production clustering run with dynamic sampling safeguards...")
+    for fish in EXPT_FISH_LIST:
+        process_single_experiment((fish, 2700, 7200, 5000, N_COMPONENTS, N_CLUSTERS))
+    print("\nAll directories populated successfully. Files are ready for loading!")
