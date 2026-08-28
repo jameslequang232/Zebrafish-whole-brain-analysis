@@ -55,7 +55,7 @@ expt_fish             = cfg.expt_fish
 EXPT_TAG              = cfg.EXPT_TAG
 NULL_TAG              = cfg.NULL_TAG
 PLOT_META             = cfg.PLOT_META
-RESPONDER_NULL_THRESH = cfg.RESPONDER_NULL_THRESH
+RESPONDER_NULL_THRESH = 95 #cfg.RESPONDER_NULL_THRESH
 sampling_rate_hz      = cfg.sampling_rate_hz
 
 from utils.data_io import fish_dir

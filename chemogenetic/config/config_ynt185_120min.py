@@ -56,7 +56,7 @@ ctrl_fish = [
     (CTRL_PROJ, "251126_huc-h2b-g8m_csn_10uM_fish1"),
 ]  # N = 7
 
-all_fish = ynt_fish
+all_fish = ynt_fish + ctrl_fish
 
 
 # ============================================================
@@ -121,7 +121,7 @@ lag_global   = 0                       # causal lag (frames)
 INCLUDED_BASELINE = 45.0               # minutes of baseline in GLM window
 CLIP_ABS_DZ       = 50.0               # |ΔZ| clipping threshold
 NULL_TAG          = "iaaft"            # "iaaft" or "shift"
-RESPONDER_NULL_THRESH = 95             # null percentile for responder cutoff
+RESPONDER_NULL_THRESH = 99             # null percentile for responder cutoff
 L_MIN = 10.0                           # plateau duration (minutes) for plateau-ΔZ
 
 # Derived: subfolder name for all GLM outputs (defined once, used everywhere)

@@ -409,11 +409,16 @@ def save_dprime_responder_idx(
     dir_analysis,
     amplitude_mode="raw",
     null_percentile=95,
+    external_thr=None,
     overwrite=True,
 ):
     """
     Classify cells as positive/negative phasic responders by comparing
-    each cell's real d′ against the symmetric IAAFT null threshold.
+    each cell's real d′ against a symmetric threshold.
+
+    If external_thr is provided (e.g. a ctrl-pooled IAAFT threshold),
+    that value is used directly and the per-fish threshold file is ignored.
+    Otherwise the per-fish IAAFT null threshold file is loaded from disk.
 
     Writes to dir_analysis / proj_ID / expt_ID /:
         phasic_pos_dprime_iaaft_nullp{P}_idxs.npy
@@ -428,7 +433,6 @@ def save_dprime_responder_idx(
     ptag = int(null_percentile)
 
     dprime_path = out_dir / f"phasic_dprime_cells_{amplitude_mode}.npy"
-    thresh_path = out_dir / f"phasic_dprime_iaaft_nullp{ptag}_thresh.npy"
     pos_path    = out_dir / f"phasic_pos_dprime_iaaft_nullp{ptag}_idxs.npy"
     neg_path    = out_dir / f"phasic_neg_dprime_iaaft_nullp{ptag}_idxs.npy"
 
@@ -438,15 +442,19 @@ def save_dprime_responder_idx(
 
     if not dprime_path.exists():
         raise FileNotFoundError(f"Missing d′ cells for {expt_ID}: {dprime_path}")
-    if not thresh_path.exists():
-        raise FileNotFoundError(
-            f"Missing IAAFT threshold for {expt_ID}: {thresh_path}\n"
-            "Run iaaft_null_dprime_one_fish() first."
-        )
+
+    if external_thr is not None:
+        thr = float(external_thr)
+    else:
+        thresh_path = out_dir / f"phasic_dprime_iaaft_nullp{ptag}_thresh.npy"
+        if not thresh_path.exists():
+            raise FileNotFoundError(
+                f"Missing IAAFT threshold for {expt_ID}: {thresh_path}\n"
+                "Run iaaft_null_dprime_one_fish() first, or pass external_thr."
+            )
+        thr = float(np.load(str(thresh_path)))
 
     dprime_cells = np.load(str(dprime_path))
-    thr = float(np.load(str(thresh_path)))
-
     pos_idx = np.where(dprime_cells > thr)[0].astype(np.int64)
     neg_idx = np.where(dprime_cells < -thr)[0].astype(np.int64)
 
@@ -465,3 +473,58 @@ def save_dprime_responder_idx(
         "n_pos": int(pos_idx.size), "n_neg": int(neg_idx.size),
         "thresh": thr,
     }
+
+
+# ============================================================
+# CTRL-POOLED IAAFT THRESHOLD
+# ============================================================
+
+def compute_ctrl_pooled_threshold(ctrl_fish_list, dir_analysis, null_percentile=95):
+    """
+    Pool surrogate d′ values across all ctrl fish null distributions and
+    return the p{null_percentile} of |d′_null| as a single scalar threshold.
+
+    This threshold is used for group-comparison figures so that both ctrl
+    and expt fish are classified against a common ctrl-level noise bar,
+    rather than each fish's own per-fish noise floor.
+
+    Reads: fish_dir(dir_analysis, fish) / phasic_dprime_null__iaaft.npy
+           shape: (n_surrogates, n_cells_sampled)
+
+    Parameters
+    ----------
+    ctrl_fish_list  : list of (proj_ID, expt_ID) tuples
+    dir_analysis    : str or Path
+    null_percentile : int, default 95
+
+    Returns
+    -------
+    thr : float
+        Symmetric threshold; classify as responder if |d′| > thr.
+    """
+    all_null_vals = []
+    for fish in ctrl_fish_list:
+        null_path = fish_dir(dir_analysis, fish) / "phasic_dprime_null__iaaft.npy"
+        if not null_path.exists():
+            print(f"  ⚠️  {fish[1]}: null distribution missing — skipping from pool")
+            continue
+        null_arr = np.load(str(null_path))      # (n_surr, n_cells_sampled)
+        flat = null_arr.ravel()
+        flat = flat[np.isfinite(flat)]
+        all_null_vals.append(flat)
+        print(f"  📦 {fish[1]}: {flat.size:,} surrogate d′ values loaded")
+
+    if not all_null_vals:
+        raise RuntimeError(
+            "No ctrl fish null distributions found — "
+            "run iaaft_null_dprime_one_fish() for ctrl fish first."
+        )
+
+    pooled = np.concatenate(all_null_vals)
+    thr = float(np.percentile(np.abs(pooled), null_percentile))
+    print(
+        f"\n  ✅ Ctrl-pooled threshold (p{null_percentile}): ±{thr:.4f}  "
+        f"({len(all_null_vals)}/{len(ctrl_fish_list)} ctrl fish, "
+        f"{pooled.size:,} surrogate values)"
+    )
+    return thr

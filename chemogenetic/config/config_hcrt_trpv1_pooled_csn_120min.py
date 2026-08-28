@@ -126,11 +126,11 @@ drift_global = 1
 lam_global   = 0.5
 lag_global   = 0
 
-INCLUDED_BASELINE     = 15.0
+INCLUDED_BASELINE     = 45.0
 CLIP_ABS_DZ           = 50.0
 NULL_TAG              = "iaaft"
-RESPONDER_NULL_THRESH = 95
-L_MIN                 = 20.0
+RESPONDER_NULL_THRESH = 99
+L_MIN                 =10.0
 
 param_folder_name = (
     f"in{input_tag}_K{K_global}_drift{drift_global}_lam{lam_global}_lag{lag_global}"
