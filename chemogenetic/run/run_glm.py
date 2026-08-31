@@ -8,7 +8,8 @@ Stages:
     B. Choose global — aggregate CV results
     C. Refit         — refit all cells with global params
     D. Ablation      — drift-only ΔR²
-    E. IAAFT null    — surrogate null distribution
+    E. IAAFT null    — surrogate null distribution (now parallel across fish;
+                        BLAS threads capped per worker to avoid oversubscription)
     F. Responders    — threshold + save pos/neg idx
 
 Regressor: empirical HCRT population trace from hcrt_all.csv
@@ -23,8 +24,21 @@ Location:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+# ── cap BLAS threads per worker BEFORE numpy import ─────────────────────────
+# With N_JOBS_STAGE_E parallel fish workers each doing ridge regression,
+# uncapped BLAS threading causes massive core oversubscription and can be
+# SLOWER than serial. Set so N_JOBS_STAGE_E * BLAS_THREADS_PER_WORKER ≈
+# total allocated CPUs (see submit_glm.sh --cpus-per-task).
+BLAS_THREADS_PER_WORKER = "4"
+os.environ["OMP_NUM_THREADS"]        = BLAS_THREADS_PER_WORKER
+os.environ["MKL_NUM_THREADS"]        = BLAS_THREADS_PER_WORKER
+os.environ["OPENBLAS_NUM_THREADS"]   = BLAS_THREADS_PER_WORKER
+os.environ["NUMEXPR_NUM_THREADS"]    = BLAS_THREADS_PER_WORKER
+os.environ["VECLIB_MAXIMUM_THREADS"] = BLAS_THREADS_PER_WORKER
 
 import numpy as np
 import pandas as pd
@@ -57,7 +71,7 @@ lag_global       = cfg.lag_global
 NULL_TAG         = cfg.NULL_TAG
 param_folder_name = cfg.param_folder_name
 Q_ml_min         = cfg.Q_ml_min
-RESPONDER_NULL_THRESH = cfg.RESPONDER_NULL_THRESH
+RESPONDER_NULL_THRESH = 95 #cfg.RESPONDER_NULL_THRESH
 sampling_rate_hz = cfg.sampling_rate_hz
 V_ml             = cfg.V_ml
 
@@ -74,18 +88,18 @@ from chemogenetic.glm import (
 # STAGE TOGGLES
 # ============================================================
 RUN_CV         = False   # set True for new experiments needing CV
-RUN_REFIT      = True
-RUN_ABLATION   = True
-RUN_NULL       = True
+RUN_REFIT      = False
+RUN_ABLATION   = False
+RUN_NULL       = False
 RUN_RESPONDERS = True
 
 # ============================================================
 # SETTINGS
 # ============================================================
 OVERWRITE_CV         = False
-OVERWRITE_REFIT      = True
-OVERWRITE_ABLATION   = True
-OVERWRITE_NULL       = True
+OVERWRITE_REFIT      = False
+OVERWRITE_ABLATION   = False
+OVERWRITE_NULL       = False
 OVERWRITE_RESPONDERS = True
 
 K_LIST        = (60, 120, 300, 600, 900, 1200)
@@ -99,10 +113,18 @@ N_SURROGATES  = 200
 N_ITER_IAAFT  = 50
 N_CELLS_NULL  = 20000
 
-BASELINE_WIN_MIN = (0.0,  15.0)
-DRUG_WIN_MIN     = (30.0, 45.0)
+# control the sign classification in Stage F (save_responder_idx) — they're separate from the fit window
+# define which minutes, relative to the start of the fit window, get averaged for this comparison.
+BASELINE_WIN_MIN = (20.0, 45.0)
+DRUG_WIN_MIN     = (60.0, 75.0)
 
-N_JOBS_FISH = 10
+N_JOBS_FISH = 16
+
+# Stage E (IAAFT null) is now parallel across fish. Keep this modest since
+# each worker also spawns BLAS_THREADS_PER_WORKER threads internally —
+# N_JOBS_STAGE_E * int(BLAS_THREADS_PER_WORKER) should stay close to your
+# allocated --cpus-per-task in submit_glm.sh (e.g. 8 * 4 = 32).
+N_JOBS_STAGE_E = 8
 
 FIT_BASELINE_SEC = INCLUDED_BASELINE * 60
 
@@ -243,8 +265,10 @@ def main():
 
     # ── E: IAAFT null ──────────────────────────────────────────
     if RUN_NULL:
-        print("\n── Stage E: IAAFT null ─────────────────────────────────")
-        for fish in all_fish:
+        print(f"\n── Stage E: IAAFT null (parallel, n_jobs={N_JOBS_STAGE_E}, "
+              f"{BLAS_THREADS_PER_WORKER} BLAS threads/worker) ──────────")
+
+        def _null(fish):
             try:
                 result = iaaft_null_one_fish(
                     **_common_kwargs(fish),
@@ -252,11 +276,17 @@ def main():
                     n_surrogates=N_SURROGATES, n_iter_iaaft=N_ITER_IAAFT,
                     n_cells_null=N_CELLS_NULL,
                     null_percentile=RESPONDER_NULL_THRESH,
-                    overwrite=OVERWRITE_NULL, show_progress=True,
+                    overwrite=OVERWRITE_NULL, show_progress=False,
                 )
-                print(f"  {fish[1]:50s}  {result['status']}")
+                return {"fish": fish, "status": result["status"]}
             except Exception as e:
-                print(f"  {fish[1]:50s}  ERROR: {e}")
+                return {"fish": fish, "status": f"ERROR: {e}"}
+
+        results = Parallel(n_jobs=N_JOBS_STAGE_E, backend="loky")(
+            delayed(_null)(fish) for fish in tqdm(all_fish, desc="IAAFT null")
+        )
+        for r in results:
+            print(f"  {r['fish'][1]:50s}  {r['status']}")
 
     # ── F: Responder indices ───────────────────────────────────
     if RUN_RESPONDERS:

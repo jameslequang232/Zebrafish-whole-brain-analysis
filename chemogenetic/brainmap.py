@@ -356,3 +356,63 @@ def plot_group_comparison(
         plt.close(fig)
 
     return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# APPEND the block below to ~/zwba/chemogenetic/brainmap.py
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _voxelize_presence(coords, responder_idx, brain_shape, ds):
+    """
+    Binary presence map per fish: 1 if ≥1 responder cell occupies this coarse
+    voxel, else 0.  Uses OR/max logic — NOT averaging — because presence is a
+    binary per-fish quantity.
+
+    Summing these per-fish volumes across all fish in a group gives the
+    N-fish count map used in the presence brain maps.
+
+    Parameters
+    ----------
+    coords : np.ndarray (n_cells, 3), dtype int
+        Template-space voxel coordinates.  -1 sentinel = invalid cell.
+    responder_idx : np.ndarray (k,), dtype int
+        Indices (into the n_cells axis) of cells that passed the IAAFT
+        threshold (pos or neg).
+    brain_shape : tuple (X, Y, Z)
+        Full-resolution template brain shape, e.g. (280, 544, 40).
+    ds : tuple (dx, dy, dz)
+        Downsampling factors, e.g. (5, 5, 2).
+
+    Returns
+    -------
+    out : np.ndarray (Xc, Yc, Zc), dtype float32
+        Values in {0.0, 1.0}. Ready to be summed across fish to build the
+        group count map.
+    """
+    cs = _coarse_shape(brain_shape, ds)
+    out = np.zeros(cs, dtype=np.float32)
+
+    if len(responder_idx) == 0:
+        return out
+
+    n_cells = coords.shape[0]
+
+    # Build per-cell binary presence array.
+    # Bounds-safe: clip responder_idx to valid range before indexing.
+    presence = np.zeros(n_cells, dtype=np.float32)
+    in_bounds = (responder_idx >= 0) & (responder_idx < n_cells)
+    presence[responder_idx[in_bounds]] = 1.0
+
+    # Drop cells with -1 sentinel coordinates.
+    valid = (coords >= 0).all(axis=1)       # (n_cells,) bool
+    coords_v   = coords[valid].astype(np.int32)   # (n_valid, 3)
+    presence_v = presence[valid]                   # (n_valid,)
+
+    xi = np.clip(coords_v[:, 0] // ds[0], 0, cs[0] - 1)
+    yi = np.clip(coords_v[:, 1] // ds[1], 0, cs[1] - 1)
+    zi = np.clip(coords_v[:, 2] // ds[2], 0, cs[2] - 1)
+
+    # OR aggregation: any responder cell in a voxel → 1.
+    np.maximum.at(out, (xi, yi, zi), presence_v)
+    return out
